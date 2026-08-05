@@ -1,0 +1,13 @@
+# Never commit the real env — it holds TURNSTILE_SECRET.
+.env
+.env.*
+!.env.example
+*.db
+*.db-journal
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.uv/
+.pytest_cache/
+.ruff_cache/

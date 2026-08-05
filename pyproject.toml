@@ -1,0 +1,19 @@
+[project]
+name = "egress-backend"
+version = "0.1.0"
+description = "Egress IELTS platform API — auth, sessions, Turnstile verification"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "sqlalchemy[asyncio]",
+    "aiosqlite",
+    "pydantic",
+    "pydantic-settings",
+    "email-validator",
+    "argon2-cffi",
+    "httpx",
+]
+
+[tool.uv]
+package = false
