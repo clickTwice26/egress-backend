@@ -24,15 +24,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import Select, func, or_, select, update
 
 from ..community import (
+    DEFAULT_TOPIC_SLUG,
     CursorError,
     can_delete,
     can_edit,
     clamp_limit,
     decode_cursor,
     encode_cursor,
+    extract_tags,
+    normalise_tag,
 )
 from ..deps import CurrentUser, DbSession, require_capability
-from ..models import Comment, Post, Reaction, User, aware_utc, utcnow
+from ..models import Comment, Post, PostTag, Reaction, Topic, User, aware_utc, utcnow
 from ..roles import weight_for
 from ..schemas import (
     AuthorOut,
@@ -46,6 +49,8 @@ from ..schemas import (
     PostUpdateRequest,
     ReactionRequest,
     ReactionSummary,
+    TagCount,
+    TopicOut,
 )
 
 router = APIRouter(prefix="/api/community", tags=["community"])
@@ -123,6 +128,10 @@ def _post_out(
     return PostOut(
         id=post.id,
         author=_author_out(post.author),
+        topic=TopicOut.model_validate(post.topic),
+        # A removed post keeps its row but stops offering its tags as a way
+        # back to it.
+        tags=[] if deleted else sorted(tag.tag for tag in post.tags),
         body=TOMBSTONE if deleted else post.body,
         created_at=post.created_at,
         edited_at=post.edited_at,
@@ -230,21 +239,101 @@ def _split_page(rows: list, limit: int) -> tuple[list, str | None]:
 # ---- Posts -----------------------------------------------------------------
 
 
+@router.get("/topics", response_model=list[TopicOut])
+async def list_topics(user: CurrentUser, db: DbSession) -> list[Topic]:
+    """The topics a post can be filed under, in display order."""
+    result = await db.execute(select(Topic).order_by(Topic.position, Topic.slug))
+    return list(result.scalars())
+
+
+@router.get("/tags/trending", response_model=list[TagCount])
+async def trending_tags(
+    user: CurrentUser,
+    db: DbSession,
+    limit: Annotated[int, Query(ge=1, le=30)] = 10,
+) -> list[TagCount]:
+    """The most-used hashtags, busiest first.
+
+    One grouped query over the tag index rather than counting per tag. Deleted
+    posts are excluded by the join, so removing a post quietly demotes the tags
+    it was propping up.
+    """
+    result = await db.execute(
+        select(PostTag.tag, func.count(PostTag.post_id).label("uses"))
+        .join(Post, Post.id == PostTag.post_id)
+        .where(Post.deleted_at.is_(None))
+        .group_by(PostTag.tag)
+        # Alphabetical within a tie, so equal counts do not shuffle between
+        # requests and make the row look like it is flickering.
+        .order_by(func.count(PostTag.post_id).desc(), PostTag.tag)
+        .limit(limit)
+    )
+    return [TagCount(tag=tag, post_count=uses) for tag, uses in result]
+
+
 @router.get("/posts", response_model=PostPage)
 async def list_feed(
     user: CurrentUser,
     db: DbSession,
     cursor: str | None = None,
     limit: Annotated[int | None, Query(ge=1, le=50)] = None,
+    topic: str | None = None,
+    tag: str | None = None,
 ) -> PostPage:
-    """The feed, newest first."""
+    """The feed, newest first, optionally narrowed to a topic or a hashtag.
+
+    Both filters are applied before the keyset predicate, so a filtered feed
+    pages exactly like the unfiltered one — the cursor means the same thing
+    either way.
+    """
     size = clamp_limit(limit)
-    stmt = _paginate(
-        select(Post).where(Post.deleted_at.is_(None)), Post, cursor, size, newest_first=True
-    )
+    stmt = select(Post).where(Post.deleted_at.is_(None))
+
+    if topic:
+        stmt = stmt.where(Post.topic_slug == topic)
+    if tag:
+        # EXISTS rather than a join: a join would need a DISTINCT to survive a
+        # post carrying the tag twice, and DISTINCT plus keyset ordering is a
+        # sort the index cannot serve.
+        stmt = stmt.where(
+            select(PostTag.id)
+            .where(PostTag.post_id == Post.id, PostTag.tag == normalise_tag(tag))
+            .exists()
+        )
+
+    stmt = _paginate(stmt, Post, cursor, size, newest_first=True)
     rows = list((await db.execute(stmt)).unique().scalars())
     page, next_cursor = _split_page(rows, size)
     return PostPage(items=await _hydrate_posts(db, page, user.id), next_cursor=next_cursor)
+
+
+async def _resolve_topic(db: DbSession, slug: str | None) -> str:
+    """The topic to file a post under, defaulting rather than failing."""
+    if not slug:
+        return DEFAULT_TOPIC_SLUG
+    topic = await db.get(Topic, slug)
+    if topic is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Unknown topic."
+        )
+    return topic.slug
+
+
+async def _sync_tags(db: DbSession, post: Post) -> None:
+    """Rewrite a post's tag rows to match its body.
+
+    Called on create and on every edit: the tags are a projection of the text,
+    so an edit that drops a hashtag has to drop the row too, or the tag feed
+    keeps promising a post that no longer mentions it.
+    """
+    wanted = set(extract_tags(post.body))
+    current = {row.tag for row in post.tags}
+
+    for row in list(post.tags):
+        if row.tag not in wanted:
+            post.tags.remove(row)
+    for tag in wanted - current:
+        post.tags.append(PostTag(tag=tag))
 
 
 @router.post("/posts", response_model=PostOut, status_code=status.HTTP_201_CREATED)
@@ -267,8 +356,14 @@ async def create_post(payload: PostCreateRequest, user: Participant, db: DbSessi
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Write something first."
         )
 
-    post = Post(author_id=user.id, body=payload.body, shared_post_id=shared_id)
+    post = Post(
+        author_id=user.id,
+        body=payload.body,
+        shared_post_id=shared_id,
+        topic_slug=await _resolve_topic(db, payload.topic_slug),
+    )
     db.add(post)
+    await _sync_tags(db, post)
     await db.commit()
 
     created = await _load_post(db, post.id)
@@ -303,10 +398,17 @@ async def update_post(
 
     post.body = payload.body
     post.edited_at = utcnow()
+    if payload.topic_slug:
+        post.topic_slug = await _resolve_topic(db, payload.topic_slug)
+    await _sync_tags(db, post)
     await db.commit()
 
-    refreshed = await _load_post(db, post_id)
-    return (await _hydrate_posts(db, [refreshed], user.id))[0]
+    # Refresh, not re-select. The session holds this row already, so a fresh
+    # SELECT hands back the same instance with its relationships as they were
+    # loaded — and a post refiled to another topic would answer with the old
+    # one. `refresh` re-runs the eager loads and replaces them.
+    await db.refresh(post)
+    return (await _hydrate_posts(db, [post], user.id))[0]
 
 
 @router.delete("/posts/{post_id}", status_code=status.HTTP_204_NO_CONTENT)

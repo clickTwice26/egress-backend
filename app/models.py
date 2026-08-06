@@ -16,6 +16,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
+from .community import DEFAULT_TOPIC_SLUG
 from .roles import DEFAULT_ROLE_SLUG
 
 
@@ -242,6 +243,17 @@ class Post(Base):
     )
     body: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
+    # Which bucket the post is filed under. Required (with a default) rather
+    # than nullable: "no topic" and "General" would be the same thing to a
+    # reader, and two ways to say it means two branches in every query.
+    topic_slug: Mapped[str] = mapped_column(
+        String(30),
+        ForeignKey("community_topics.slug", ondelete="RESTRICT"),
+        default=DEFAULT_TOPIC_SLUG,
+        nullable=False,
+        index=True,
+    )
+
     # Self-reference: the post this one shares. Never chained — sharing a share
     # points at the original, so rendering is one level deep, always.
     shared_post_id: Mapped[str | None] = mapped_column(
@@ -258,11 +270,17 @@ class Post(Base):
 
     author: Mapped["User"] = relationship(lazy="joined")
     shared_post: Mapped["Post | None"] = relationship(remote_side=[id], lazy="joined", join_depth=1)
+    topic: Mapped["Topic"] = relationship(lazy="joined")
+    tags: Mapped[list["PostTag"]] = relationship(
+        back_populates="post", cascade="all, delete-orphan", lazy="selectin"
+    )
 
     __table_args__ = (
         # The feed's keyset index: newest first, id breaking ties. Covers both
         # the ordering and the "not deleted" filter the feed always applies.
         Index("ix_community_posts_feed", "deleted_at", "created_at", "id"),
+        # The same page, narrowed to one topic — the filter row's query.
+        Index("ix_community_posts_topic_feed", "topic_slug", "deleted_at", "created_at", "id"),
     )
 
     @property
@@ -342,4 +360,49 @@ class Reaction(Base):
         UniqueConstraint("user_id", "target_type", "target_id", name="uq_reaction_per_target"),
         # The breakdown query: every reaction on a page of targets, grouped.
         Index("ix_community_reactions_target", "target_type", "target_id", "kind"),
+    )
+
+
+class Topic(Base):
+    """A curated bucket a post is filed under.
+
+    A table rather than an enum so a topic can be added, renamed or reordered
+    without a deployment, and so a post's foreign key keeps the set honest.
+    """
+
+    __tablename__ = "community_topics"
+
+    slug: Mapped[str] = mapped_column(String(30), primary_key=True)
+    label: Mapped[str] = mapped_column(String(60), nullable=False)
+    description: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    # Display order, spaced so a new topic can be slotted between two existing
+    # ones — the same trick the role weights use.
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
+
+
+class PostTag(Base):
+    """One hashtag on one post.
+
+    A row per (post, tag) rather than a delimited string on the post: this is
+    what makes "everything tagged #band7" an index lookup instead of a table
+    scan with a LIKE, and what lets the trending list be a GROUP BY.
+
+    Tags are derived from the body on every write, so this table is a
+    projection of the text — never edited on its own.
+    """
+
+    __tablename__ = "community_post_tags"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    post_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("community_posts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    tag: Mapped[str] = mapped_column(String(50), nullable=False)
+
+    post: Mapped["Post"] = relationship(back_populates="tags")
+
+    __table_args__ = (
+        UniqueConstraint("post_id", "tag", name="uq_tag_per_post"),
+        # Posts carrying one tag, and the trending count, both start here.
+        Index("ix_community_post_tags_tag", "tag", "post_id"),
     )

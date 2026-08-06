@@ -29,6 +29,7 @@ async def init_db() -> None:
         await _add_missing_columns(conn)
 
     await _seed_roles()
+    await _seed_topics()
 
 
 async def _add_missing_columns(conn) -> None:
@@ -42,14 +43,27 @@ async def _add_missing_columns(conn) -> None:
     """
     from sqlalchemy import text
 
-    result = await conn.execute(text("PRAGMA table_info(users)"))
-    columns = {row[1] for row in result}
-    if "role_slug" not in columns:
-        from .roles import DEFAULT_ROLE_SLUG
+    from .community import DEFAULT_TOPIC_SLUG
+    from .roles import DEFAULT_ROLE_SLUG
 
-        await conn.execute(
-            text(f"ALTER TABLE users ADD COLUMN role_slug VARCHAR(30) NOT NULL DEFAULT '{DEFAULT_ROLE_SLUG}'")
-        )
+    # (table, column, DDL for the column) — additive only. Anything that needs
+    # a table rewritten or data moved belongs in a real migration, not here.
+    additions = (
+        ("users", "role_slug", f"VARCHAR(30) NOT NULL DEFAULT '{DEFAULT_ROLE_SLUG}'"),
+        (
+            "community_posts",
+            "topic_slug",
+            f"VARCHAR(30) NOT NULL DEFAULT '{DEFAULT_TOPIC_SLUG}'",
+        ),
+    )
+
+    for table, column, ddl in additions:
+        result = await conn.execute(text(f"PRAGMA table_info({table})"))
+        columns = {row[1] for row in result}
+        # An empty result means the table does not exist yet, in which case
+        # create_all has just built it with every column already present.
+        if columns and column not in columns:
+            await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
 
 
 async def _seed_roles() -> None:
@@ -70,5 +84,29 @@ async def _seed_roles() -> None:
             return
         session.add_all(
             Role(slug=spec.slug, label=spec.label, weight=spec.weight) for spec in missing
+        )
+        await session.commit()
+
+
+async def _seed_topics() -> None:
+    """Insert any default topic that is missing, leaving existing ones alone."""
+    from sqlalchemy import select
+
+    from .community import DEFAULT_TOPICS
+    from .models import Topic
+
+    async with SessionLocal() as session:
+        existing = set((await session.execute(select(Topic.slug))).scalars())
+        missing = [spec for spec in DEFAULT_TOPICS if spec.slug not in existing]
+        if not missing:
+            return
+        session.add_all(
+            Topic(
+                slug=spec.slug,
+                label=spec.label,
+                description=spec.description,
+                position=spec.position,
+            )
+            for spec in missing
         )
         await session.commit()

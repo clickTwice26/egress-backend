@@ -82,9 +82,25 @@ class AuthorOut(BaseModel):
     role_weight: int
 
 
+class TopicOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    slug: str
+    label: str
+    description: str
+
+
+class TagCount(BaseModel):
+    tag: str
+    post_count: int
+
+
 class PostOut(BaseModel):
     id: str
     author: AuthorOut
+    topic: TopicOut
+    # Hashtags found in the body, normalised. Derived on write, never sent up.
+    tags: list[str]
     body: str
     created_at: datetime
     edited_at: datetime | None
@@ -131,6 +147,9 @@ class CommentPage(BaseModel):
 class PostCreateRequest(BaseModel):
     body: str = Field(default="", max_length=MAX_POST_BODY)
     shared_post_id: str | None = None
+    # Absent means the default topic rather than an error: a post with nothing
+    # chosen still belongs somewhere.
+    topic_slug: str | None = Field(default=None, max_length=30)
 
     @field_validator("body")
     @classmethod
@@ -140,6 +159,8 @@ class PostCreateRequest(BaseModel):
 
 class PostUpdateRequest(BaseModel):
     body: str = Field(min_length=1, max_length=MAX_POST_BODY)
+    # Omitted leaves the post where it is; editing must not silently refile it.
+    topic_slug: str | None = Field(default=None, max_length=30)
 
     @field_validator("body")
     @classmethod

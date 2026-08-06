@@ -6,6 +6,9 @@ these rules can be reasoned about (and tested) on their own.
 
 import base64
 import binascii
+import re
+import unicodedata
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
@@ -24,6 +27,84 @@ MAX_COMMENT_BODY = 2000
 # client asking for the whole table in one call.
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 50
+
+
+@dataclass(frozen=True)
+class TopicSpec:
+    slug: str
+    label: str
+    description: str
+    position: int
+
+
+# The topics a post can be filed under. A fixed, curated list rather than
+# free-form categories: five or six good buckets get used, forty do not, and a
+# reader scanning the filter row can hold this many in their head.
+DEFAULT_TOPICS: tuple[TopicSpec, ...] = (
+    TopicSpec("general", "General", "Anything else about preparing for the test.", 10),
+    TopicSpec("listening", "Listening", "Sections, accents, note completion.", 20),
+    TopicSpec("reading", "Reading", "Passages, timing, question types.", 30),
+    TopicSpec("writing", "Writing", "Task 1 and Task 2, feedback and models.", 40),
+    TopicSpec("speaking", "Speaking", "Parts 1 to 3, fluency, partners.", 50),
+    TopicSpec("test-day", "Test day", "Booking, centres, nerves, results.", 60),
+    TopicSpec("resources", "Resources", "Books, sites and material worth the time.", 70),
+)
+
+DEFAULT_TOPIC_SLUG = "general"
+
+
+# Where a hashtag may begin. The lookbehind keeps '#' inside a URL fragment, a
+# repeated '##', or an identifier like 'C#5' from starting one.
+_TAG_START = re.compile(r"(?<![\w#/])#")
+
+MAX_TAGS_PER_POST = 10
+MAX_TAG_LENGTH = 50
+
+
+def _is_tag_character(character: str) -> bool:
+    """Whether a character continues a hashtag.
+
+    `\\w` is not enough. In Bengali, Devanagari and much of South and South-East
+    Asia a word is letters *plus* combining vowel signs, which `\\w` excludes —
+    so '#বাংলা' would be harvested as '#ব', silently truncating tags for a large
+    part of the audience. Marks are admitted explicitly.
+    """
+    return character.isalnum() or character == "_" or unicodedata.category(character) in {"Mn", "Mc"}
+
+
+def extract_tags(body: str) -> list[str]:
+    """The hashtags in a post body, normalised and deduplicated.
+
+    Extraction happens on the server because the server owns the stored body:
+    a client that forgot to send its tags, or invented some the text does not
+    contain, would otherwise put the index out of step with what people read.
+
+    A tag must contain a letter. Without that rule '#1' and '#2' in a numbered
+    list become tags, and the trending list fills up with ordinals.
+    """
+    seen: dict[str, None] = {}
+
+    for match in _TAG_START.finditer(body):
+        characters: list[str] = []
+        for character in body[match.end() : match.end() + MAX_TAG_LENGTH]:
+            if not _is_tag_character(character):
+                break
+            characters.append(character)
+
+        tag = "".join(characters).casefold()
+        if not tag or not any(character.isalpha() for character in tag):
+            continue
+
+        seen.setdefault(tag)
+        if len(seen) >= MAX_TAGS_PER_POST:
+            break
+
+    return list(seen)
+
+
+def normalise_tag(tag: str) -> str:
+    """The stored form of a tag, for lookups coming in from a URL."""
+    return tag.lstrip("#").casefold()[:MAX_TAG_LENGTH]
 
 
 class CursorError(ValueError):
