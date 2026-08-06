@@ -1,7 +1,7 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -100,3 +100,67 @@ class AuthSession(Base):
             and aware_utc(self.refresh_expires_at) > now
             and aware_utc(self.family_expires_at) > now
         )
+
+
+class StudyPlan(Base):
+    """A generated week-by-week schedule leading up to a user's test date.
+
+    One plan per user: regenerating replaces the previous plan and its tasks
+    rather than accumulating them, which keeps "my plan" unambiguous.
+    """
+
+    __tablename__ = "study_plans"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True
+    )
+
+    test_date: Mapped[date] = mapped_column(Date, nullable=False)
+    target_band: Mapped[float] = mapped_column(Float, nullable=False)
+    hours_per_week: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # The self-assessed starting point, kept so the plan can be explained back
+    # to the user and regenerated on the same basis.
+    listening_band: Mapped[float] = mapped_column(Float, nullable=False)
+    reading_band: Mapped[float] = mapped_column(Float, nullable=False)
+    writing_band: Mapped[float] = mapped_column(Float, nullable=False)
+    speaking_band: Mapped[float] = mapped_column(Float, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    tasks: Mapped[list["StudyTask"]] = relationship(
+        back_populates="plan",
+        cascade="all, delete-orphan",
+        order_by="StudyTask.scheduled_on, StudyTask.position",
+    )
+
+
+class StudyTask(Base):
+    """One scheduled study session on one day."""
+
+    __tablename__ = "study_tasks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    plan_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("study_plans.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    scheduled_on: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    # Ordering within a day, so two sessions on the same date stay stable.
+    position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    skill: Mapped[str] = mapped_column(String(20), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    plan: Mapped["StudyPlan"] = relationship(back_populates="tasks")
+
+    __table_args__ = (Index("ix_study_tasks_plan_date", "plan_id", "scheduled_on"),)
+
+    @property
+    def completed(self) -> bool:
+        return self.completed_at is not None

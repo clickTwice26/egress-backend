@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .database import SessionLocal, init_db
-from .routers import auth
+from .routers import auth, study_plan
 from .sessions import purge_expired
 
 logging.basicConfig(level=logging.INFO)
@@ -42,11 +42,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
 app.include_router(auth.router)
+app.include_router(study_plan.router)
 
 
 @app.get("/health", tags=["meta"])

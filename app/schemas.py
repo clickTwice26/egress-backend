@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
@@ -71,3 +71,55 @@ class TokenPair(BaseModel):
 
 class MessageOut(BaseModel):
     message: str
+
+
+# ---- Study plan ----
+
+# IELTS reports in half bands from 4.0; below that the plan advice does not
+# meaningfully differ.
+Band = Annotated[float, Field(ge=4.0, le=9.0, multiple_of=0.5)]
+
+
+class SkillBands(BaseModel):
+    listening: Band
+    reading: Band
+    writing: Band
+    speaking: Band
+
+
+class StudyPlanIntake(BaseModel):
+    """What the user tells us before a plan can be generated."""
+
+    test_date: date
+    target_band: Band
+    current_bands: SkillBands
+    hours_per_week: int = Field(ge=1, le=40)
+
+
+class StudyTaskOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    scheduled_on: date
+    position: int
+    skill: str
+    kind: str
+    title: str
+    minutes: int
+    completed: bool
+
+
+class StudyPlanOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    test_date: date
+    target_band: float
+    hours_per_week: int
+    current_bands: SkillBands
+    created_at: datetime
+    tasks: list[StudyTaskOut]
+
+
+class TaskCompletionRequest(BaseModel):
+    completed: bool
