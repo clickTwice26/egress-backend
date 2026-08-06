@@ -1,10 +1,22 @@
 import uuid
 from datetime import date, datetime, timezone
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
+from .roles import DEFAULT_ROLE_SLUG
 
 
 def _uuid() -> str:
@@ -28,6 +40,23 @@ def aware_utc(dt: datetime | None) -> datetime | None:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
+class Role(Base):
+    """A named position on the privilege scale.
+
+    The row that matters is ``weight``: every permission check compares numbers,
+    so a role can be renamed, or a new one inserted between two existing ones,
+    without touching a single check. See ``app/roles.py``.
+    """
+
+    __tablename__ = "roles"
+
+    slug: Mapped[str] = mapped_column(String(30), primary_key=True)
+    label: Mapped[str] = mapped_column(String(60), nullable=False)
+    weight: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+
+    users: Mapped[list["User"]] = relationship(back_populates="role")
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -38,12 +67,27 @@ class User(Base):
     # Argon2id hash. Never stores or logs the plaintext password.
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     module: Mapped[str] = mapped_column(String(20), default="academic", nullable=False)
+    role_slug: Mapped[str] = mapped_column(
+        String(30),
+        ForeignKey("roles.slug", ondelete="RESTRICT"),
+        default=DEFAULT_ROLE_SLUG,
+        nullable=False,
+        index=True,
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    # Joined eagerly: every authenticated request asks for the weight, and a
+    # lazy load on an async session raises rather than quietly issuing a query.
+    role: Mapped["Role"] = relationship(back_populates="users", lazy="joined")
 
     sessions: Mapped[list["AuthSession"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+
+    @property
+    def role_weight(self) -> int:
+        return self.role.weight
 
 
 class AuthSession(Base):
@@ -164,3 +208,138 @@ class StudyTask(Base):
     @property
     def completed(self) -> bool:
         return self.completed_at is not None
+
+
+# ---- Community ----
+#
+# Three tables carry the feed: posts, comments and reactions. Two decisions are
+# worth stating up front because everything else follows from them.
+#
+# 1. Counts are denormalised onto the row they describe. A feed page renders
+#    "12 comments · 40 reactions" for twenty posts; recounting those from the
+#    child tables would be forty aggregate queries per page. They are kept
+#    honest by updating them in the same transaction as the write that moves
+#    them, with `x = x + 1` so two concurrent writers cannot lose an increment.
+#
+# 2. Deletion is soft. A deleted post whose comments vanished would tear holes
+#    in every thread quoting it, so the row survives with `deleted_at` set and
+#    the API renders a tombstone. Purging is a separate, deliberate job.
+
+
+class Post(Base):
+    """One entry in the community feed.
+
+    A share is a post like any other with ``shared_post_id`` pointing at the
+    original — the same row shape, so the feed query does not special-case it,
+    and a share can carry its own body ("this helped me").
+    """
+
+    __tablename__ = "community_posts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    author_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    # Self-reference: the post this one shares. Never chained — sharing a share
+    # points at the original, so rendering is one level deep, always.
+    shared_post_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("community_posts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    comment_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reaction_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    share_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    author: Mapped["User"] = relationship(lazy="joined")
+    shared_post: Mapped["Post | None"] = relationship(remote_side=[id], lazy="joined", join_depth=1)
+
+    __table_args__ = (
+        # The feed's keyset index: newest first, id breaking ties. Covers both
+        # the ordering and the "not deleted" filter the feed always applies.
+        Index("ix_community_posts_feed", "deleted_at", "created_at", "id"),
+    )
+
+    @property
+    def deleted(self) -> bool:
+        return self.deleted_at is not None
+
+
+class Comment(Base):
+    """A comment on a post, or a reply to another comment.
+
+    One table serves both: a reply is a comment whose ``parent_id`` is set.
+    ``post_id`` is carried on every row, including deep replies, so a thread can
+    be counted or purged without walking the chain.
+    """
+
+    __tablename__ = "community_comments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    post_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("community_posts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    parent_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("community_comments.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    author_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    reply_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reaction_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    author: Mapped["User"] = relationship(lazy="joined")
+
+    __table_args__ = (
+        # Root comments of a post, oldest first — the thread page's query.
+        Index("ix_community_comments_thread", "post_id", "parent_id", "created_at", "id"),
+        # Replies to one comment, same ordering.
+        Index("ix_community_comments_replies", "parent_id", "created_at", "id"),
+    )
+
+    @property
+    def deleted(self) -> bool:
+        return self.deleted_at is not None
+
+
+class Reaction(Base):
+    """One account's reaction to one post or comment.
+
+    The unique constraint is the whole concurrency story: an account holds at
+    most one reaction per target, so reacting again *changes* the kind rather
+    than stacking, and a double-tap cannot double-count.
+
+    ``target_type`` plus ``target_id`` rather than two nullable foreign keys:
+    reactions are read by target, never joined across, and one table means one
+    index and one code path for posts and comments alike.
+    """
+
+    __tablename__ = "community_reactions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "target_type", "target_id", name="uq_reaction_per_target"),
+        # The breakdown query: every reaction on a page of targets, grouped.
+        Index("ix_community_reactions_target", "target_type", "target_id", "kind"),
+    )

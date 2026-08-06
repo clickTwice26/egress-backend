@@ -1,11 +1,12 @@
 from datetime import date, timezone
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
-from ..deps import CurrentUser, DbSession
-from ..models import StudyPlan, StudyTask, utcnow
+from ..deps import CurrentUser, DbSession, require_capability
+from ..models import StudyPlan, StudyTask, User, utcnow
 from ..schemas import (
     SkillBands,
     StudyPlanIntake,
@@ -17,6 +18,11 @@ from ..schemas import (
 from ..study_plan import PlanError, generate_plan
 
 router = APIRouter(prefix="/api/study-plan", tags=["study-plan"])
+
+# Writing to a plan is gated on weight, not on being signed in: the threshold
+# sits at the base role today, so every account clears it, and lifting the bar
+# later (or dropping a suspended role below it) needs no change here.
+PlanEditor = Annotated[User, Depends(require_capability("plan.manage"))]
 
 _NO_PLAN = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No study plan yet.")
 
@@ -57,7 +63,7 @@ async def get_plan(user: CurrentUser, db: DbSession) -> StudyPlanOut | None:
 
 
 @router.post("", response_model=StudyPlanOut, status_code=status.HTTP_201_CREATED)
-async def create_plan(payload: StudyPlanIntake, user: CurrentUser, db: DbSession) -> StudyPlanOut:
+async def create_plan(payload: StudyPlanIntake, user: PlanEditor, db: DbSession) -> StudyPlanOut:
     """Generate a plan from the intake, replacing any existing one."""
     bands = payload.current_bands.model_dump()
 
@@ -120,7 +126,7 @@ async def _load_task(db: DbSession, task_id: str, user_id: str) -> StudyTask:
 
 
 @router.post("/tasks", response_model=StudyTaskOut, status_code=status.HTTP_201_CREATED)
-async def create_task(payload: StudyTaskCreate, user: CurrentUser, db: DbSession) -> StudyTaskOut:
+async def create_task(payload: StudyTaskCreate, user: PlanEditor, db: DbSession) -> StudyTaskOut:
     """Add a session to the plan by hand.
 
     A generated plan is a starting point, not a contract: sessions can be added
@@ -155,7 +161,7 @@ async def create_task(payload: StudyTaskCreate, user: CurrentUser, db: DbSession
 
 @router.patch("/tasks/{task_id}", response_model=StudyTaskOut)
 async def update_task(
-    task_id: str, payload: StudyTaskUpdate, user: CurrentUser, db: DbSession
+    task_id: str, payload: StudyTaskUpdate, user: PlanEditor, db: DbSession
 ) -> StudyTaskOut:
     """Edit one session. Ticking it off is the same call with only `completed`."""
     task = await _load_task(db, task_id, user.id)
@@ -183,7 +189,7 @@ async def update_task(
 
 
 @router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_task(task_id: str, user: CurrentUser, db: DbSession) -> Response:
+async def delete_task(task_id: str, user: PlanEditor, db: DbSession) -> Response:
     task = await _load_task(db, task_id, user.id)
     await db.delete(task)
     await db.commit()
@@ -191,7 +197,7 @@ async def delete_task(task_id: str, user: CurrentUser, db: DbSession) -> Respons
 
 
 @router.delete("", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_plan(user: CurrentUser, db: DbSession) -> Response:
+async def delete_plan(user: PlanEditor, db: DbSession) -> Response:
     plan = await _load_plan(db, user.id)
     if plan is None:
         raise _NO_PLAN

@@ -10,6 +10,7 @@ from ..schemas import (
     ForgotPasswordRequest,
     LoginRequest,
     MessageOut,
+    ProfileUpdateRequest,
     RefreshRequest,
     RegisterRequest,
     TokenPair,
@@ -163,6 +164,24 @@ async def logout(db: DbSession, token: str = Depends(get_bearer_token)) -> Messa
 
 @router.get("/me", response_model=UserOut)
 async def me(user: CurrentUser) -> UserOut:
+    return UserOut.model_validate(user)
+
+
+@router.patch("/me", response_model=UserOut)
+async def update_me(payload: ProfileUpdateRequest, user: CurrentUser, db: DbSession) -> UserOut:
+    """Edit your own profile.
+
+    Only the fields listed on ``ProfileUpdateRequest`` can move: email and role
+    are not editable here, so a caller cannot rename their way into another
+    account's identity or a heavier role.
+    """
+    changes = payload.model_dump(exclude_unset=True, exclude_none=True)
+    for field, value in changes.items():
+        setattr(user, field, value)
+
+    if changes:
+        await db.commit()
+        await db.refresh(user)
     return UserOut.model_validate(user)
 
 

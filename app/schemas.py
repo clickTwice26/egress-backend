@@ -3,6 +3,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+from .community import MAX_COMMENT_BODY, MAX_POST_BODY
+
 # Turnstile posts the token under this exact key. Accepting the hyphenated
 # form keeps the frontend payload identical to a native form submission.
 TURNSTILE_FIELD = "cf-turnstile-response"
@@ -48,6 +50,15 @@ class RefreshRequest(BaseModel):
     refresh_token: str = Field(min_length=1)
 
 
+class RoleOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    slug: str
+    label: str
+    # The only field a privilege decision should ever read.
+    weight: int
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -55,7 +66,165 @@ class UserOut(BaseModel):
     email: str
     name: str
     module: str
+    role: RoleOut
     created_at: datetime
+
+
+class AuthorOut(BaseModel):
+    """The public face of an account. No email — the feed is not a directory."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    role_label: str
+    # Carried so the client can badge staff by weight rather than by role name.
+    role_weight: int
+
+
+class PostOut(BaseModel):
+    id: str
+    author: AuthorOut
+    body: str
+    created_at: datetime
+    edited_at: datetime | None
+    # A removed post keeps its place in every thread that quotes it; the client
+    # renders a tombstone instead of the body.
+    deleted: bool
+    comment_count: int
+    reaction_count: int
+    share_count: int
+    # kind -> count, for the summary row. Absent kinds are simply not present.
+    reactions: dict[str, int]
+    # What the caller themselves reacted with, if anything.
+    viewer_reaction: str | None
+    # The post this one shares, resolved one level deep and never further.
+    shared_post: "PostOut | None" = None
+
+
+class CommentOut(BaseModel):
+    id: str
+    post_id: str
+    parent_id: str | None
+    author: AuthorOut
+    body: str
+    created_at: datetime
+    edited_at: datetime | None
+    deleted: bool
+    reply_count: int
+    reaction_count: int
+    reactions: dict[str, int]
+    viewer_reaction: str | None
+
+
+class PostPage(BaseModel):
+    items: list[PostOut]
+    # Feed the cursor back to fetch the next page; null means the end.
+    next_cursor: str | None
+
+
+class CommentPage(BaseModel):
+    items: list[CommentOut]
+    next_cursor: str | None
+
+
+class PostCreateRequest(BaseModel):
+    body: str = Field(default="", max_length=MAX_POST_BODY)
+    shared_post_id: str | None = None
+
+    @field_validator("body")
+    @classmethod
+    def clean_body(cls, value: str) -> str:
+        return value.strip()
+
+
+class PostUpdateRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=MAX_POST_BODY)
+
+    @field_validator("body")
+    @classmethod
+    def clean_body(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("A post cannot be empty.")
+        return cleaned
+
+
+class CommentCreateRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=MAX_COMMENT_BODY)
+    # Set to reply to a comment; absent for a comment on the post itself.
+    parent_id: str | None = None
+
+    @field_validator("body")
+    @classmethod
+    def clean_body(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("A comment cannot be empty.")
+        return cleaned
+
+
+class CommentUpdateRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=MAX_COMMENT_BODY)
+
+    @field_validator("body")
+    @classmethod
+    def clean_body(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("A comment cannot be empty.")
+        return cleaned
+
+
+class ReactionRequest(BaseModel):
+    target_type: Literal["post", "comment"]
+    target_id: str
+    kind: Literal["like", "love", "insightful", "celebrate", "curious"]
+
+
+class ReactionSummary(BaseModel):
+    """Returned after reacting, so the client corrects its optimistic guess."""
+
+    target_type: str
+    target_id: str
+    reaction_count: int
+    reactions: dict[str, int]
+    viewer_reaction: str | None
+
+
+class ProfileUpdateRequest(BaseModel):
+    """What an account may change about itself.
+
+    Email is absent on purpose: it identifies the account and is the recovery
+    channel, so changing it needs a confirmation flow that does not exist yet.
+    Role is absent too — that moves only through the role endpoints, which are
+    weight-gated, or anyone could promote themselves here.
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    module: Literal["academic", "general"] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Name cannot be blank.")
+        return cleaned
+
+
+class RoleAssignRequest(BaseModel):
+    role_slug: str = Field(min_length=1, max_length=30)
+
+
+class RoleCreateRequest(BaseModel):
+    """Adds a rung to the ladder. Weight is the whole point of the row."""
+
+    slug: str = Field(min_length=1, max_length=30, pattern=r"^[a-z][a-z0-9-]*$")
+    label: str = Field(min_length=1, max_length=60)
+    weight: int = Field(ge=0, le=1000)
 
 
 class TokenPair(BaseModel):
