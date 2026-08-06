@@ -42,7 +42,11 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    # PUT is here for reactions: reacting is an upsert of one row keyed by
+    # (user, target), so it is idempotent — PUT, not POST. A method missing
+    # from this list fails at the preflight, which reads in the browser as the
+    # request never happening rather than as a CORS error.
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
