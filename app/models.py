@@ -2,6 +2,7 @@ import uuid
 from datetime import date, datetime, timezone
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     Date,
     DateTime,
@@ -406,3 +407,123 @@ class PostTag(Base):
         # Posts carrying one tag, and the trending count, both start here.
         Index("ix_community_post_tags_tag", "tag", "post_id"),
     )
+
+
+# ---- Test content ----
+#
+# Test -> QuestionGroup -> Question, matching how an IELTS paper is actually
+# built. See app/content.py for why the middle layer exists.
+
+
+class Test(Base):
+    """One sitting: a mini test of roughly ten questions.
+
+    `kind` carries listening, reading, writing or speaking rather than four
+    near-identical tables. The papers differ in which *question types* they
+    allow and which media they carry, not in their structure, and a shared
+    table means the editor, the listing and the CRUD are written once.
+    """
+
+    __tablename__ = "tests"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    # Stable, human-readable, unique — the URL a test will eventually live at.
+    slug: Mapped[str] = mapped_column(String(220), unique=True, nullable=False, index=True)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    difficulty: Mapped[str] = mapped_column(String(10), nullable=False, default="medium")
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="draft", index=True)
+    duration_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=15)
+
+    # Listening carries audio; reading carries a passage; writing and speaking
+    # carry neither. Nullable rather than four subclass tables.
+    audio_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    transcript: Mapped[str | None] = mapped_column(Text, nullable=True)
+    passage: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_by_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_by: Mapped["User | None"] = relationship(lazy="joined")
+    groups: Mapped[list["QuestionGroup"]] = relationship(
+        back_populates="test",
+        cascade="all, delete-orphan",
+        order_by="QuestionGroup.position",
+        lazy="selectin",
+    )
+
+    __table_args__ = (
+        # The library listing: one kind, published first, newest first.
+        Index("ix_tests_kind_status", "kind", "status", "created_at"),
+    )
+
+
+class QuestionGroup(Base):
+    """One task: a run of questions sharing an instruction and a format."""
+
+    __tablename__ = "test_question_groups"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    test_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tests.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    type: Mapped[str] = mapped_column(String(40), nullable=False)
+    instructions: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # The form, table or notes the gaps sit in, for completion tasks.
+    body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The shared box of choices for matching tasks, as a JSON array of strings.
+    # JSON rather than another table: the options are meaningless apart from
+    # their group, are always read whole, and are never queried across.
+    options: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # A map or diagram the questions label.
+    image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    test: Mapped["Test"] = relationship(back_populates="groups")
+    questions: Mapped[list["Question"]] = relationship(
+        back_populates="group",
+        cascade="all, delete-orphan",
+        order_by="Question.position",
+        lazy="selectin",
+    )
+
+    __table_args__ = (Index("ix_question_groups_test_position", "test_id", "position"),)
+
+
+class Question(Base):
+    """One numbered item."""
+
+    __tablename__ = "test_questions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    group_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("test_question_groups.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # The number printed on the paper. Not derived from position: a group can
+    # be reordered without renumbering the test under the reader.
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    # How many numbers this item covers. "Questions 1-2: choose TWO letters" is
+    # one item worth two marks, so it spans two — which is why a ten-question
+    # paper does not always hold ten rows.
+    span: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    options: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # Every accepted spelling or wording: ["colour", "color"]. A list, because
+    # marking a gap-fill against one exact string fails honest answers.
+    answers: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    explanation: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    group: Mapped["QuestionGroup"] = relationship(back_populates="questions")
+
+    __table_args__ = (Index("ix_questions_group_position", "group_id", "position"),)

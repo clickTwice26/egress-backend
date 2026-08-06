@@ -55,6 +55,9 @@ async def _add_missing_columns(conn) -> None:
             "topic_slug",
             f"VARCHAR(30) NOT NULL DEFAULT '{DEFAULT_TOPIC_SLUG}'",
         ),
+        # How many numbers a question covers. Existing rows are single-mark
+        # items, which is exactly what the default says.
+        ("test_questions", "span", "INTEGER NOT NULL DEFAULT 1"),
     )
 
     for table, column, ddl in additions:

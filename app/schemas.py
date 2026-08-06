@@ -236,6 +236,224 @@ class ProfileUpdateRequest(BaseModel):
         return cleaned
 
 
+# ---- Test content ----
+
+TestKind = Literal["listening", "reading", "writing", "speaking"]
+TestStatus = Literal["draft", "published"]
+Difficulty = Literal["easy", "medium", "hard"]
+
+
+class QuestionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    position: int
+    number: int
+    #: Numbers covered, so the editor can label "Questions 1-2".
+    span: int
+    prompt: str
+    options: list[str]
+    answers: list[str]
+    explanation: str
+
+
+class QuestionGroupOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    position: int
+    type: str
+    instructions: str
+    body: str | None
+    options: list[str]
+    image_url: str | None
+    questions: list[QuestionOut]
+
+
+class TestSummaryOut(BaseModel):
+    """A row in the content list — no questions, so the list stays cheap."""
+
+    id: str
+    kind: str
+    title: str
+    slug: str
+    summary: str
+    difficulty: str
+    status: str
+    duration_minutes: int
+    question_count: int
+    group_count: int
+    created_at: datetime
+    updated_at: datetime
+    author_name: str | None
+
+
+class TestOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    kind: str
+    title: str
+    slug: str
+    summary: str
+    difficulty: str
+    status: str
+    duration_minutes: int
+    audio_url: str | None
+    transcript: str | None
+    passage: str | None
+    created_at: datetime
+    updated_at: datetime
+    published_at: datetime | None
+    groups: list[QuestionGroupOut]
+
+
+class KindSummary(BaseModel):
+    """How much material exists for one paper, for the chooser."""
+
+    kind: str
+    label: str
+    published: int
+    draft: int
+
+
+class TestPage(BaseModel):
+    items: list[TestSummaryOut]
+    next_cursor: str | None
+
+
+class TestCreateRequest(BaseModel):
+    kind: TestKind
+    title: str = Field(min_length=1, max_length=200)
+    summary: str = Field(default="", max_length=2000)
+    difficulty: Difficulty = "medium"
+    duration_minutes: int = Field(default=15, ge=1, le=240)
+    audio_url: str | None = Field(default=None, max_length=500)
+    transcript: str | None = None
+    passage: str | None = None
+
+    @field_validator("title")
+    @classmethod
+    def strip_title(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Give the test a title.")
+        return cleaned
+
+
+class TestUpdateRequest(BaseModel):
+    """Every field optional: the editor saves one panel at a time."""
+
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    summary: str | None = Field(default=None, max_length=2000)
+    difficulty: Difficulty | None = None
+    status: TestStatus | None = None
+    duration_minutes: int | None = Field(default=None, ge=1, le=240)
+    audio_url: str | None = Field(default=None, max_length=500)
+    transcript: str | None = None
+    passage: str | None = None
+
+
+class QuestionGroupCreateRequest(BaseModel):
+    type: str = Field(min_length=1, max_length=40)
+    instructions: str = Field(default="", max_length=1000)
+    body: str | None = None
+    options: list[str] = Field(default_factory=list)
+    image_url: str | None = Field(default=None, max_length=500)
+
+
+class QuestionGroupUpdateRequest(BaseModel):
+    type: str | None = Field(default=None, min_length=1, max_length=40)
+    instructions: str | None = Field(default=None, max_length=1000)
+    body: str | None = None
+    options: list[str] | None = None
+    image_url: str | None = Field(default=None, max_length=500)
+    position: int | None = Field(default=None, ge=0)
+
+
+class QuestionCreateRequest(BaseModel):
+    prompt: str = Field(default="", max_length=2000)
+    number: int | None = Field(default=None, ge=1, le=200)
+    # Defaults to what the group's type implies.
+    span: int | None = Field(default=None, ge=1, le=10)
+    options: list[str] = Field(default_factory=list)
+    answers: list[str] = Field(default_factory=list)
+    explanation: str = Field(default="", max_length=4000)
+
+
+class QuestionUpdateRequest(BaseModel):
+    prompt: str | None = Field(default=None, max_length=2000)
+    number: int | None = Field(default=None, ge=1, le=200)
+    span: int | None = Field(default=None, ge=1, le=10)
+    options: list[str] | None = None
+    answers: list[str] | None = None
+    explanation: str | None = Field(default=None, max_length=4000)
+    position: int | None = Field(default=None, ge=0)
+
+
+class QuestionTypeOut(BaseModel):
+    """What the editor needs to render a type without knowing its name."""
+
+    slug: str
+    label: str
+    kinds: list[str]
+    default_instructions: str
+    group_options: bool
+    question_options: bool
+    answers_per_question: int
+    group_body: bool
+    notes: str
+
+
+class ReviewIssue(BaseModel):
+    where: str
+    problem: str
+
+
+class TestReviewOut(BaseModel):
+    """Everything standing between a draft and publishing it."""
+
+    publishable: bool
+    issues: list[ReviewIssue]
+
+
+class AdminUserOut(BaseModel):
+    """A member as an administrator sees them — including the email."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    email: str
+    module: str
+    role: RoleOut
+    is_active: bool
+    created_at: datetime
+
+
+class AdminUserPage(BaseModel):
+    items: list[AdminUserOut]
+    next_cursor: str | None
+
+
+class RoleTally(BaseModel):
+    slug: str
+    label: str
+    weight: int
+    member_count: int
+
+
+class AdminStats(BaseModel):
+    """Counts for the admin overview. Cheap aggregates, computed on request."""
+
+    members: int
+    roles: list[RoleTally]
+    posts: int
+    comments: int
+    reactions: int
+    study_plans: int
+
+
 class RoleAssignRequest(BaseModel):
     role_slug: str = Field(min_length=1, max_length=30)
 

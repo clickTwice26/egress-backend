@@ -49,6 +49,10 @@ CAPABILITY_WEIGHTS: dict[str, int] = {
     "practice.unlimited": 30,
     # Community moderation: hide posts, resolve reports.
     "content.moderate": 60,
+    # Authoring practice material: create, edit and publish tests. Set at the
+    # same bar as moderation so a trusted contributor can write tests without
+    # being handed the whole account roster.
+    "tests.manage": 60,
     # Change other people's roles, see the roster.
     "roles.assign": 90,
 }
