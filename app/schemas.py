@@ -123,3 +123,51 @@ class StudyPlanOut(BaseModel):
 
 class TaskCompletionRequest(BaseModel):
     completed: bool
+
+
+# A hand-made task must describe itself in the same vocabulary the generator
+# uses, so the calendar dots and chips render it exactly like a generated one.
+TaskSkill = Literal["listening", "reading", "writing", "speaking"]
+TaskKind = Literal["drill", "mock", "review", "exam"]
+TaskTitle = Annotated[str, Field(min_length=1, max_length=200)]
+# A whole day is the ceiling; zero is allowed for an untimed reminder.
+TaskMinutes = Annotated[int, Field(ge=0, le=1440)]
+
+
+class StudyTaskCreate(BaseModel):
+    """A session the user adds to their plan by hand."""
+
+    scheduled_on: date
+    skill: TaskSkill
+    kind: TaskKind
+    title: TaskTitle
+    minutes: TaskMinutes = 45
+
+    @field_validator("title")
+    @classmethod
+    def strip_title(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Give the session a title.")
+        return stripped
+
+
+class StudyTaskUpdate(BaseModel):
+    """A partial edit. Every field is optional; omitted ones stay as they are."""
+
+    scheduled_on: date | None = None
+    skill: TaskSkill | None = None
+    kind: TaskKind | None = None
+    title: TaskTitle | None = None
+    minutes: TaskMinutes | None = None
+    completed: bool | None = None
+
+    @field_validator("title")
+    @classmethod
+    def strip_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Give the session a title.")
+        return stripped
