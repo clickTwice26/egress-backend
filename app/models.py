@@ -591,8 +591,21 @@ class Attempt(Base):
     )
 
     __table_args__ = (
-        # The candidate's own history, newest first.
-        Index("ix_attempts_user_submitted", "user_id", "submitted_at"),
+        # The candidate's own history, newest first. Ordered by started_at
+        # because an in-progress attempt has no submitted_at, and sorting on a
+        # null column pushes live attempts to the wrong end of the list.
+        Index("ix_attempts_user_started", "user_id", "started_at"),
+        # The band prediction filters user + kind + status and then takes the
+        # most recent few. Without every one of those columns in the index,
+        # SQLite matches on user_id alone and filters the rest in memory — for
+        # a heavy user that is most of their history scanned per skill.
+        Index(
+            "ix_attempts_prediction",
+            "user_id",
+            "kind",
+            "status",
+            "submitted_at",
+        ),
     )
 
 

@@ -8,6 +8,25 @@ from .config import get_settings
 settings = get_settings()
 
 engine = create_async_engine(settings.database_url, echo=False, future=True)
+
+
+if settings.database_url.startswith("sqlite"):
+    from sqlalchemy import event
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enforce_sqlite_foreign_keys(dbapi_connection, _record) -> None:
+        """Turn on foreign key enforcement for every SQLite connection.
+
+        SQLite ships with foreign keys DISABLED and the setting is per
+        connection, not per database. Without this, every `ON DELETE CASCADE`
+        declared on a model is inert: deleting a test leaves its question
+        groups behind as orphans, and nothing complains. The ORM cascades in
+        Python when you delete a loaded object, which hides the problem right
+        up until the first bulk `delete()`.
+        """
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -28,8 +47,28 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
         await _add_missing_columns(conn)
 
+    await _create_missing_indexes()
     await _seed_roles()
     await _seed_topics()
+
+
+async def _create_missing_indexes() -> None:
+    """Add indexes declared after a database was first created.
+
+    ``create_all`` builds indexes only alongside a table it is creating, so an
+    index added to an existing model never appears on an existing database.
+    ``IF NOT EXISTS`` makes this safe to run on every boot.
+    """
+    from sqlalchemy import text
+
+    statements = (
+        "CREATE INDEX IF NOT EXISTS ix_attempts_user_started ON attempts (user_id, started_at)",
+        "CREATE INDEX IF NOT EXISTS ix_attempts_prediction "
+        "ON attempts (user_id, kind, status, submitted_at)",
+    )
+    async with engine.begin() as conn:
+        for statement in statements:
+            await conn.execute(text(statement))
 
 
 async def _add_missing_columns(conn) -> None:
