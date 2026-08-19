@@ -1,0 +1,16 @@
+# Secrets must never enter the image — they are injected at runtime.
+.env
+.env.*
+!.env.example
+
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.db
+*.db-journal
+.git/
+.gitignore
+.pytest_cache/
+.ruff_cache/
+README.md

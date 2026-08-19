@@ -20,6 +20,18 @@ from ..community import CursorError, clamp_limit, decode_cursor, encode_cursor
 from ..content import (
     QUESTION_TYPES,
     TEST_KIND_LABELS,
+    MODULE_LABELS,
+    SPEAKING_PART_LABELS,
+    SPEAKING_PART_TWO_PREP_SECONDS,
+    SPEAKING_PART_TWO_TALK_SECONDS,
+    SPEAKING_CRITERIA,
+    SPEAKING_PARTS,
+    WRITING_CRITERIA,
+    WRITING_TASKS,
+    WRITING_TASK_LABELS,
+    WRITING_TASK_MIN_WORDS,
+    WRITING_TASK_MINUTES,
+    WRITING_TASK_WEIGHT,
     question_type,
     review_test,
 )
@@ -32,7 +44,11 @@ from ..schemas import (
     QuestionGroupOut,
     QuestionGroupUpdateRequest,
     QuestionOut,
+    ContentReferenceOut,
+    CriterionOut,
     QuestionTypeOut,
+    SpeakingPartOut,
+    WritingTaskOut,
     QuestionUpdateRequest,
     ReviewIssue,
     TestCreateRequest,
@@ -91,6 +107,7 @@ def _summary(test: Test, question_count: int, group_count: int) -> TestSummaryOu
         summary=test.summary,
         difficulty=test.difficulty,
         status=test.status,
+        module=test.module,
         duration_minutes=test.duration_minutes,
         question_count=question_count,
         group_count=group_count,
@@ -105,10 +122,17 @@ def _review(test: Test) -> TestReviewOut:
         kind=test.kind,
         title=test.title,
         audio_url=test.audio_url,
+        module=test.module,
+        passage=test.passage,
         groups=[
             {
                 "type": group.type,
                 "options": group.options,
+                "body": group.body,
+                "image_url": group.image_url,
+                "word_limit": group.word_limit,
+                "speaking_part": group.speaking_part,
+                "writing_task": group.writing_task,
                 "questions": [
                     {
                         "number": q.number,
@@ -148,6 +172,10 @@ async def list_question_types(user: CurrentUser) -> list[QuestionTypeOut]:
             question_options=spec.question_options,
             answers_per_question=spec.answers_per_question,
             group_body=spec.group_body,
+            takes_word_limit=spec.takes_word_limit,
+            default_word_limit=spec.default_word_limit,
+            fixed_answers=list(spec.fixed_answers),
+            rubric_marked=spec.rubric_marked,
             notes=spec.notes,
         )
         for spec in QUESTION_TYPES
@@ -157,6 +185,50 @@ async def list_question_types(user: CurrentUser) -> list[QuestionTypeOut]:
 @router.get("/kinds", response_model=dict[str, str])
 async def list_kinds(user: CurrentUser) -> dict[str, str]:
     return TEST_KIND_LABELS
+
+
+@router.get("/modules", response_model=dict[str, str])
+async def list_modules(user: CurrentUser) -> dict[str, str]:
+    """Academic / General Training, for the paper's audience selector."""
+    return MODULE_LABELS
+
+
+@router.get("/reference", response_model=ContentReferenceOut)
+async def content_reference(user: CurrentUser) -> ContentReferenceOut:
+    """Everything the editor needs that is a fact about IELTS, not about data.
+
+    Served rather than duplicated in the client so the exam's own rules —
+    part labels, task word counts, marking criteria — have one home.
+    """
+    return ContentReferenceOut(
+        kinds=TEST_KIND_LABELS,
+        modules=MODULE_LABELS,
+        speaking_parts=[
+            SpeakingPartOut(
+                part=part,
+                label=SPEAKING_PART_LABELS[part],
+                prep_seconds=SPEAKING_PART_TWO_PREP_SECONDS if part == 2 else None,
+                talk_seconds=SPEAKING_PART_TWO_TALK_SECONDS if part == 2 else None,
+            )
+            for part in SPEAKING_PARTS
+        ],
+        writing_tasks=[
+            WritingTaskOut(
+                task=task,
+                label=WRITING_TASK_LABELS[task],
+                min_words=WRITING_TASK_MIN_WORDS[task],
+                minutes=WRITING_TASK_MINUTES[task],
+                weight=WRITING_TASK_WEIGHT[task],
+            )
+            for task in WRITING_TASKS
+        ],
+        writing_criteria=[
+            CriterionOut(slug=c.slug, label=c.label, summary=c.summary) for c in WRITING_CRITERIA
+        ],
+        speaking_criteria=[
+            CriterionOut(slug=c.slug, label=c.label, summary=c.summary) for c in SPEAKING_CRITERIA
+        ],
+    )
 
 
 @router.get("/summary", response_model=list[KindSummary])
@@ -381,6 +453,13 @@ async def create_group(
         body=payload.body,
         options=payload.options,
         image_url=payload.image_url,
+        # Pre-filling the cap the exam usually prints for this task means the
+        # common case needs no thought, and the review still catches the rest.
+        word_limit=payload.word_limit if payload.word_limit is not None else spec.default_word_limit,
+        # Speaking and writing tasks default to their first part/task so a new
+        # group is never in an invalid state the author did not choose.
+        speaking_part=payload.speaking_part or (1 if test.kind == "speaking" else None),
+        writing_task=payload.writing_task or (1 if test.kind == "writing" else None),
     )
     db.add(group)
     await db.commit()

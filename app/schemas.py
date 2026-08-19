@@ -241,6 +241,8 @@ class ProfileUpdateRequest(BaseModel):
 TestKind = Literal["listening", "reading", "writing", "speaking"]
 TestStatus = Literal["draft", "published"]
 Difficulty = Literal["easy", "medium", "hard"]
+#: Reading and Writing differ between the two; Listening and Speaking do not.
+Module = Literal["both", "academic", "general"]
 
 
 class QuestionOut(BaseModel):
@@ -267,6 +269,12 @@ class QuestionGroupOut(BaseModel):
     body: str | None
     options: list[str]
     image_url: str | None
+    #: "NO MORE THAN TWO WORDS" as a number, for marking.
+    word_limit: int | None
+    #: Speaking only: which of the three parts this task belongs to.
+    speaking_part: int | None
+    #: Writing only: Task 1 or Task 2.
+    writing_task: int | None
     questions: list[QuestionOut]
 
 
@@ -280,6 +288,7 @@ class TestSummaryOut(BaseModel):
     summary: str
     difficulty: str
     status: str
+    module: str
     duration_minutes: int
     question_count: int
     group_count: int
@@ -298,6 +307,7 @@ class TestOut(BaseModel):
     summary: str
     difficulty: str
     status: str
+    module: str
     duration_minutes: int
     audio_url: str | None
     transcript: str | None
@@ -327,6 +337,7 @@ class TestCreateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     summary: str = Field(default="", max_length=2000)
     difficulty: Difficulty = "medium"
+    module: Module = "both"
     duration_minutes: int = Field(default=15, ge=1, le=240)
     audio_url: str | None = Field(default=None, max_length=500)
     transcript: str | None = None
@@ -348,6 +359,7 @@ class TestUpdateRequest(BaseModel):
     summary: str | None = Field(default=None, max_length=2000)
     difficulty: Difficulty | None = None
     status: TestStatus | None = None
+    module: Module | None = None
     duration_minutes: int | None = Field(default=None, ge=1, le=240)
     audio_url: str | None = Field(default=None, max_length=500)
     transcript: str | None = None
@@ -360,6 +372,9 @@ class QuestionGroupCreateRequest(BaseModel):
     body: str | None = None
     options: list[str] = Field(default_factory=list)
     image_url: str | None = Field(default=None, max_length=500)
+    word_limit: int | None = Field(default=None, ge=1, le=10)
+    speaking_part: int | None = Field(default=None, ge=1, le=3)
+    writing_task: int | None = Field(default=None, ge=1, le=2)
 
 
 class QuestionGroupUpdateRequest(BaseModel):
@@ -368,6 +383,9 @@ class QuestionGroupUpdateRequest(BaseModel):
     body: str | None = None
     options: list[str] | None = None
     image_url: str | None = Field(default=None, max_length=500)
+    word_limit: int | None = Field(default=None, ge=1, le=10)
+    speaking_part: int | None = Field(default=None, ge=1, le=3)
+    writing_task: int | None = Field(default=None, ge=1, le=2)
     position: int | None = Field(default=None, ge=0)
 
 
@@ -402,6 +420,10 @@ class QuestionTypeOut(BaseModel):
     question_options: bool
     answers_per_question: int
     group_body: bool
+    takes_word_limit: bool
+    default_word_limit: int | None
+    fixed_answers: list[str]
+    rubric_marked: bool
     notes: str
 
 
@@ -579,3 +601,139 @@ class StudyTaskUpdate(BaseModel):
         if not stripped:
             raise ValueError("Give the session a title.")
         return stripped
+
+
+# ---- Content reference data -------------------------------------------------
+
+
+class CriterionOut(BaseModel):
+    """One of the four axes an essay or a recording is scored on."""
+
+    slug: str
+    label: str
+    summary: str
+
+
+class SpeakingPartOut(BaseModel):
+    part: int
+    label: str
+    #: Part 2 only — the candidate gets a minute to prepare and up to two to talk.
+    prep_seconds: int | None
+    talk_seconds: int | None
+
+
+class WritingTaskOut(BaseModel):
+    task: int
+    label: str
+    min_words: int
+    minutes: int
+    #: Task 2 counts double toward the Writing band.
+    weight: int
+
+
+class ContentReferenceOut(BaseModel):
+    """Facts about the exam the editor renders but does not own."""
+
+    kinds: dict[str, str]
+    modules: dict[str, str]
+    speaking_parts: list[SpeakingPartOut]
+    writing_tasks: list[WritingTaskOut]
+    writing_criteria: list[CriterionOut]
+    speaking_criteria: list[CriterionOut]
+
+
+# ---- Attempts (sitting a test) ----------------------------------------------
+
+AttemptStatus = Literal["in_progress", "submitted"]
+
+
+class AnswerSubmission(BaseModel):
+    question_id: str
+    #: A list because one item can take more than one answer ("choose TWO").
+    response: list[str] = Field(default_factory=list)
+
+
+class AnswerSaveRequest(BaseModel):
+    """Autosave: whatever the candidate has written so far."""
+
+    answers: list[AnswerSubmission] = Field(default_factory=list)
+
+
+class AnswerResultOut(BaseModel):
+    question_id: str
+    number: int
+    span: int
+    response: list[str]
+    #: Withheld until the attempt is submitted, so the key cannot be scraped.
+    accepted: list[str] | None
+    correct: bool | None
+    marks: int
+    max_marks: int
+    explanation: str
+    #: The answer matched but ran over the word cap, which is why it scored 0.
+    over_word_limit: bool
+
+
+class CriterionScoreOut(BaseModel):
+    criterion: str
+    label: str
+    score: float
+    comment: str
+
+
+class CriterionScoreRequest(BaseModel):
+    criterion: str = Field(min_length=1, max_length=40)
+    # Half bands are legal; whole-number-only would misreport most essays.
+    score: float = Field(ge=0, le=9)
+    comment: str = Field(default="", max_length=4000)
+
+
+class AttemptOut(BaseModel):
+    id: str
+    test_id: str
+    test_title: str
+    kind: str
+    module: str
+    status: AttemptStatus
+    raw_score: int | None
+    max_score: int | None
+    band: float | None
+    started_at: datetime
+    submitted_at: datetime | None
+    #: Present once submitted.
+    results: list[AnswerResultOut] = Field(default_factory=list)
+    #: Writing and speaking only.
+    criterion_scores: list[CriterionScoreOut] = Field(default_factory=list)
+    #: True when an examiner still has to score this paper.
+    awaiting_examiner: bool = False
+
+
+class AttemptSummaryOut(BaseModel):
+    """A row in the candidate's history."""
+
+    id: str
+    test_id: str
+    test_title: str
+    kind: str
+    status: AttemptStatus
+    raw_score: int | None
+    max_score: int | None
+    band: float | None
+    submitted_at: datetime | None
+
+
+class SkillBandOut(BaseModel):
+    skill: str
+    label: str
+    band: float | None
+    #: How many marked attempts the estimate rests on.
+    attempts: int
+
+
+class BandPredictionOut(BaseModel):
+    """The estimate the dashboard shows, and what it is built from."""
+
+    overall: float | None
+    skills: list[SkillBandOut]
+    #: Attempts considered per skill. Fewer means a less reliable estimate.
+    window: int

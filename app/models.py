@@ -437,6 +437,11 @@ class Test(Base):
     status: Mapped[str] = mapped_column(String(10), nullable=False, default="draft", index=True)
     duration_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=15)
 
+    # Which candidates the paper is for. Listening and Speaking are identical
+    # across the two, so they stay "both"; Reading and Writing genuinely differ
+    # and a paper that does not say which it is cannot be served correctly.
+    module: Mapped[str] = mapped_column(String(10), nullable=False, default="both", index=True)
+
     # Listening carries audio; reading carries a passage; writing and speaking
     # carry neither. Nullable rather than four subclass tables.
     audio_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -488,6 +493,18 @@ class QuestionGroup(Base):
     # A map or diagram the questions label.
     image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
+    # The cap the candidate is given: "NO MORE THAN TWO WORDS" is 2. Marking
+    # needs this as a number — an answer over the cap is wrong even when it
+    # means the right thing, and that rule cannot be read out of prose.
+    word_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Speaking only. Which of the three parts this task belongs to; Part 2 is
+    # the cue card, with its own prep and talk timings.
+    speaking_part: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Writing only. Task 1 or Task 2 — they differ in length, time and weight.
+    writing_task: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     test: Mapped["Test"] = relationship(back_populates="groups")
     questions: Mapped[list["Question"]] = relationship(
         back_populates="group",
@@ -527,3 +544,107 @@ class Question(Base):
     group: Mapped["QuestionGroup"] = relationship(back_populates="questions")
 
     __table_args__ = (Index("ix_questions_group_position", "group_id", "position"),)
+
+
+class Attempt(Base):
+    """One sitting of one test by one candidate.
+
+    Kept separate from the test it is an attempt at, so a test can be edited or
+    unpublished without rewriting anyone's history. `kind` and `module` are
+    copied at submission rather than read back through the relationship for the
+    same reason: the band a candidate was given must not change because someone
+    later retagged the paper.
+    """
+
+    __tablename__ = "attempts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    test_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tests.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    # in_progress -> submitted. A submitted attempt is never reopened; a retake
+    # is a new row, which is what makes "last six tests" meaningful.
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="in_progress", index=True)
+
+    # Snapshotted from the test at submission so the score stays reproducible.
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    module: Mapped[str] = mapped_column(String(10), nullable=False, default="both")
+
+    raw_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Null while in progress, and null for papers that only an examiner can score.
+    band: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    test: Mapped["Test"] = relationship(lazy="joined")
+    answers: Mapped[list["AttemptAnswer"]] = relationship(
+        back_populates="attempt", cascade="all, delete-orphan", lazy="selectin"
+    )
+    criterion_scores: Mapped[list["AttemptCriterionScore"]] = relationship(
+        back_populates="attempt", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+    __table_args__ = (
+        # The candidate's own history, newest first.
+        Index("ix_attempts_user_submitted", "user_id", "submitted_at"),
+    )
+
+
+class AttemptAnswer(Base):
+    """What the candidate wrote for one numbered item, and how it scored."""
+
+    __tablename__ = "attempt_answers"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    attempt_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("attempts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    question_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("test_questions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    # A list because one item can take more than one answer ("choose TWO").
+    response: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # Null until marked, and null for rubric-marked papers.
+    correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    marks: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    attempt: Mapped["Attempt"] = relationship(back_populates="answers")
+
+    __table_args__ = (
+        # One answer per question per attempt; saving again overwrites.
+        Index("ix_attempt_answers_unique", "attempt_id", "question_id", unique=True),
+    )
+
+
+class AttemptCriterionScore(Base):
+    """One examiner score on one of the four Writing or Speaking criteria."""
+
+    __tablename__ = "attempt_criterion_scores"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    attempt_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("attempts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: Matches a slug from WRITING_CRITERIA or SPEAKING_CRITERIA.
+    criterion: Mapped[str] = mapped_column(String(40), nullable=False)
+    #: Half bands are legal, so this is a float rather than an int.
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    comment: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    scored_by_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    attempt: Mapped["Attempt"] = relationship(back_populates="criterion_scores")
+
+    __table_args__ = (
+        Index("ix_criterion_scores_unique", "attempt_id", "criterion", unique=True),
+    )

@@ -58,6 +58,14 @@ async def _add_missing_columns(conn) -> None:
         # How many numbers a question covers. Existing rows are single-mark
         # items, which is exactly what the default says.
         ("test_questions", "span", "INTEGER NOT NULL DEFAULT 1"),
+        # Academic vs General Training. Existing papers predate the split and
+        # claim neither, which is what "both" means.
+        ("tests", "module", "VARCHAR(10) NOT NULL DEFAULT 'both'"),
+        # Nullable, because only completion and short-answer tasks carry a cap
+        # and existing rows have never had one recorded.
+        ("test_question_groups", "word_limit", "INTEGER"),
+        ("test_question_groups", "speaking_part", "INTEGER"),
+        ("test_question_groups", "writing_task", "INTEGER"),
     )
 
     for table, column, ddl in additions:

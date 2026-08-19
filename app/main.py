@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .database import SessionLocal, init_db
-from .routers import admin, auth, community, content, roles, study_plan
+from .routers import admin, attempts, auth, community, content, roles, study_plan
 from .sessions import purge_expired
 
 logging.basicConfig(level=logging.INFO)
@@ -52,6 +52,7 @@ app.add_middleware(
 
 app.include_router(admin.router)
 app.include_router(auth.router)
+app.include_router(attempts.router)
 app.include_router(community.router)
 app.include_router(content.router)
 app.include_router(roles.router)
